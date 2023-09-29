@@ -1,0 +1,979 @@
+---
+title: "Projet Série Temporelle"
+author: "Laffineur Loïc"
+date : Vendredi 30 Décembre 2022
+output: pdf_document
+---
+
+L'objectif de se projet est de prédire les valeurs d'une série temporelle à l'aide des prédicteurs et méthodes vues en cours. Pour cela nous utiliserons une base de données trouvée sur kaggle : https://www.kaggle.com/datasets/yingwurenjian/chicago-divvy-bicycle-sharing-data. Commençons par regarder nos données afin de nous familiariser avec et essayer de définir notre problème.
+
+```{r, library, include=FALSE, echo=FALSE}
+library(tidyverse) #Manipulation
+library(lubridate) #Date
+library(rpart) #Decision Tree
+library(ranger) #Random Forest
+library(ggplot2) #Plot
+library(mgcv) #Modèle GAM
+library(opera) #Agregation d'experts
+library(xgboost) #XGBoost
+library(FactoMineR) #ACP
+library(factoextra) #ACP
+library(corrplot) #Matrice de corrélation
+```
+
+```{r, chargement bdd brut, include=FALSE, echo=FALSE}
+data_full=read.csv('E:/Projet M2/Série temporelles (Projet)/data.csv')
+```
+
+# Visualisation des données de la table brut : 
+
+```{r, Visualisation des données de la table brut, echo=FALSE}
+print("Résumé de nos données : ")
+summary(data_full)
+```
+
+Nous avons dans nos données les informations complètes de tous les emprunts de vélos Divvy dans la ville de Chicago entre 2014 et 2017. Ces informations ont été enrichies par des données météos notamment la température au moment de l'emprunt et le temps qu'il faisait (nuageux, pluvieux,...). On a donc en tout 23 variables dont des informations calendaire : l'année, le mois, la semaine de l'année, le jour de la semaine, l'heure; Des informations sur le voyage : l'id du voyage, le type d'utilisateur (abonné, client occasionnel, ...) et son genre (Homme/Femme), la durée du voyage, la station de départ, d'arrivée (les noms et ids), le moment exact du départ et de l'arrivée, latitude, longitude des stations d'arrivée et de départ, la capacité d'accueil des stations d'arrivée et de départ; Et enfin les informations météorologiques : temperature et events. 
+
+Par la suite, grâce à ses données, nous essayerons de prédire la quantité de vélo emprunter le lendemain sur une période de 6 mois (ie notre train devra contenir 6 mois de données : environ 1/8e de ce qu'on a). On aura besoin de manipuler un peu les données et notamment de retirer l'indivualité de nos voyages (ça ne nous interesse plus) donc nous allons commencer par observer nos données actuelle afin de nous familiariser un peu avec le comportement des emprunteurs.
+
+Nous commenceront par une étude des emprunteurs. Qui sont-ils, comment se comportent-ils et quelles sont leurs habitudes d'emprunt ? 
+
+```{r, usertype/events/gender, echo=FALSE,fig.width = 8,fig.height=5}
+#Visualisation de la répartition des types d'utilisateur dans nos données : 
+df_user=data.frame(distinct(data_full["usertype"]), Quantité=c(sum(data_full[,7]=="Subscriber"),sum(data_full[,7]=="Customer"),
+                                                       sum(data_full[,7]=="Dependent")))
+df_user=data.frame(df_user,Pourcentage=substr(100*df_user$Quantité/nrow(data_full),1,5))
+print(arrange(df_user,by=desc(Quantité)))
+
+#Visualisation de la répartition du la variable gender : 
+df_gender=data.frame(distinct(data_full["gender"]), Quantité=c(sum(data_full["gender"]=="Male"),sum(data_full["gender"]=="Female")))
+df_gender=data.frame(df_gender,Pourcentage=substr(100*df_gender$Quantité/nrow(data_full),1,5))
+pie(df_gender[,2],labels=c("Male","Female"),col=rainbow(2),main="Répartition Homme/Femme")
+
+#Visualisation de la répartition des différents événements météorologique sur la période observée (2014-2017) : 
+df_events=data.frame(distinct(data_full["events"]), Quantité=c(sum(data_full["events"]=="tstorms"),sum(data_full["events"]=="rain or snow"),
+                                                     sum(data_full["events"]=="cloudy"),sum(data_full["events"]=="not clear"),
+                                                     sum(data_full["events"]=="clear"),sum(data_full["events"]=="unknown")))
+df_events=data.frame(df_events,Pourcentage=substr(100*df_events$Quantité/nrow(data_full),1,5))
+barplot(df_events[,2],col=rainbow(nrow(df_events)),names.arg =c("tstorms","rain or snow","cloudy","not clear","clear","unknown"),main="Barplot de la répartition des events entre 2014 et 2017")
+```
+
+On remarque donc déjà que nous avons 3 types de clients mais quasiment que des abonnés (99.9%) et que trois quarts de nos emprunteurs sont des hommes.
+On observe aussi que la majorité du temps (88%) le temps est nuageux au moment de l'emprunt. Très peu d'emprunt sont effectués lorsqu'il pleut, qu'il neige ou qu'il y a des vents forts (ce n'est pas étonnant).
+
+```{r, year/month/week, echo=FALSE}
+#Visualisation de la quantité d'emprunt par année : 
+df_year=data.frame(distinct(data_full["year"]), Quantité=c(sum(data_full["year"]=="2014"),sum(data_full["year"]=="2015"),
+                                                           sum(data_full["year"]=="2016"),sum(data_full["year"]=="2017")))
+barplot(df_year[,2],col=rainbow(nrow(df_year)),names.arg =c(2014,2015,2016,2017),main="Répartition des emprunts par année")
+
+#Visualisation de la quantité d'emprunt par mois :
+month=rep(NA,12)
+for(i in 1:12){month[i]=sum(data_full['month']==i)}
+df_month=data.frame(arrange(distinct(data_full['month']),by=month),Quantité=month)
+barplot(df_month[,2],col=rainbow(nrow(df_month)),names.arg =c(1:12),main="Répartition des emprunts par mois")
+
+#Visualisation de la quantité d'emprunt par semaine de l'année :
+week=rep(NA,nrow(distinct(data_full["week"])))
+for(i in 1:nrow(distinct(data_full["week"]))){week[i]=sum(data_full['week']==i)}
+df_week=data.frame(arrange(distinct(data_full['week']),by=week),Quantité=week)
+barplot(df_week[,2],col=rainbow(nrow(df_week)),names.arg =c(1:nrow(distinct(data_full["week"]))),main="Répartition des emprunts par semaine de l'année")
+```
+Il semblerait que la quantité d'emprunt ne fasse que d'augmenter chaque année en commençant par l'année 2014, après recherche on s'apperçoit que l'entreprise s'est lancée en fin juin 2013. La hausse peut s'expliquer par une hausse de popularité de ce mode de transport et est surement aussi liée aux expansions successives qui ont suivies. 
+On peut également noter qu'en général les emprunts sont réalisés entre avril/mai et octobre, on peut penser que cela est un effet de la température et du temps qu'il fait dehors. Plus précisement entre les semaines 14 (début avril) et 46 (mi-novembre), avant la 14e et après la 46e nous observons une baisse de la quantité d'emprunt.
+
+```{r, day/hour, echo=FALSE}
+#Visualisation de la quantité d'emprunt par jour de la semaine :
+day=rep(NA,7)
+for(i in 1:7){day[i]=sum(data_full['day']==i-1)}
+df_day=data.frame(arrange(distinct(data_full['day']),by=day),Quantité=day)
+barplot(df_day[,2],col=rainbow(nrow(df_day)),names.arg =c(1:7),main="Répartition des emprunts par jour de la semaine")
+
+#Visualisation de la quantité d'emprunt par heure de la journée :
+hour=rep(NA,nrow(distinct(data_full["hour"])))
+for(i in 1:nrow(distinct(data_full["hour"]))){hour[i]=sum(data_full['hour']==i-1)}
+df_hour=data.frame(arrange(distinct(data_full['hour']),by=hour),Quantité=hour)
+barplot(df_hour[,2],col=rainbow(nrow(df_hour)),names.arg =c(1:nrow(distinct(data_full["hour"]))),main="Répartition des emprunts par heure de la journée")
+```
+
+Sans surprise nous pouvons, au vu de nos deux barplots, supposer que nos emprunteurs sont majoritairement des travailleurs et utilisent les vélos afin d'aller ou revenir du travail. En effet, on remarque des pics d'emprunt aux heures de pointe : entre 7h et 9h et entre 17h et 19h. Plus de trajets sont également réalisées en semaine qu'en week-end ou hors de ces heures de pointe.
+
+```{r, temperature/trip_duration, echo=FALSE}
+hist(data_full['tripduration'][,1],main="Histogramme de la variable durée du trajet",xlab="Durée du trajet")
+print("Résumé de la variable durée du trajet : ")
+summary(data_full['tripduration'][,1])
+
+plot(1:nrow(data_full),data_full$temperature,type='l',ylab="Température",xlab='Instant')
+print("Résumé de la variable température : ")
+summary(data_full['temperature'][,1])
+```
+
+Les voyages durent en moyenne 11 minutes et s'étendent jusqu'à une heure (les données avec plus d'une heure de trajet sont surement enlevées des données car on suppose qu'elle ne représente pas un vrai trajet). Nos données n'étant pas à un pas de temps regulier nous n'observont pas une temperature très lisse mais on apperçoit quand même un peu de regularité, un petit paterne se dégage.
+
+Nous allons maintenant retirer toute l'individualité de nos tables ainsi que rajouter (et changer) quelques variables calendaires (position du jour dans l'année, l'instant,...) et aussi créer notre variable d'intêret : Le nombre de vélo emprunté dans la demi-heure (on appelera cela un Instant car ce sera notre pas de temps).
+
+```{r, echo=FALSE,warning=FALSE}
+rm(df_day,df_events,df_gender,df_hour,df_month,df_user,df_week,df_day,day,hour,i,month,week,df_year)
+```
+
+```{r, Reduction de la taille de la base (Ne pas relancer), echo=FALSE,eval=FALSE}
+##Suppression des variables qui ne m'interesse pas et des variables calendaires afin de mieux les reconstruire.
+data=select(data_full,-hour,-year,-day,-month,-week,-trip_id,-usertype,-gender,-longitude_start,-longitude_end,-latitude_start,-latitude_end,-dpcapacity_start,-dpcapacity_end,-to_station_id,-to_station_name,-stoptime,-tripduration,-dpcapacity_end,-dpcapacity_start,-to_station_id,-to_station_name,-from_station_id,-from_station_name) 
+
+#Ajout de variables calendaires grâce à lubridate : 
+data=mutate(data,
+                   Posy_s          = (lubridate::yday(starttime)-1)/(364+lubridate::leap_year(starttime)*1),
+                   hour_s=hour(starttime),
+                   year_s=year(starttime),
+                   month_s=month(starttime),
+                   week_s=week(starttime),
+                   day_s=day(starttime),
+                   wday_s=wday(starttime),
+                   Instant= 2*hour(starttime)+1*(minute(starttime)==30)
+)
+data=mutate(select(data,-starttime),
+            DateTime= ymd_hms(paste0(data["year_s"][,1],"-",data["month_s"][,1],"-",data["day_s"][,1]," ",data["hour_s"][,1],":",(30*data["Instant"]%%2)[,1],":00")))
+
+#Création de ma variable d'interêt : Le nombre d'emprunt de vélo par trentaine de minutes :
+data_2014=filter(data,data["year_s"]=="2014"); data_2014<- data_2014[order(data_2014$DateTime),]
+data_2015=filter(data,data["year_s"]=="2015"); data_2015<- data_2015[order(data_2015$DateTime),]
+data_2016=filter(data,data["year_s"]=="2016"); data_2016<- data_2016[order(data_2016$DateTime),]
+data_2017=filter(data,data["year_s"]=="2017"); data_2017<- data_2017[order(data_2017$DateTime),]
+
+first_tour=0
+for(m in 1:length(sort(distinct(data_2014["month_s"])[,1]))){ #Je parcours mes mois de l'année 2014
+  data_m=filter(data_2014,data_2014["month_s"]==m) #Je crée une table qu'avec mon mois 2014
+  for(d in 1:length(sort(distinct(data_m["day_s"])[,1]))){ #Je parcours mes jours de ce mois de 2014
+    data_md=filter(data_m,data_m["day_s"]==d) #Je crée une table qu'avec ce jour de ce mois de 2014
+    dist_inst=sort(distinct(data_md["Instant"])[,1]) ##Je trie les différents instant de ce jour
+    nb_inst=rep(NA,length(dist_inst)) #J'initialise une liste qui va contenir le nb d'emprunt de chaque instant de ce jour
+    if(length(dist_inst)==0){break;} #Si length(dist_inst)==0 (ie : j'ai aucun instnat dans la journée)
+    for (i in 1:length(nb_inst)){ #Je parcours mes instants
+        nb_inst[i]=nrow(filter(data_md,data_md["Instant"]==dist_inst[i])) #Le nombre de ligne tq l'instant dans ma table soit egale a ca
+    }
+    inst_qte=data.frame(Instant=dist_inst,Nb_emprunte=nb_inst) #Liste instant de la journée - nb emprunté par instant
+    df=inner_join(distinct(data_md),inst_qte,by="Instant") #Je joins a la table du jour dans laquelle je retire les doublons ma variable nb emprunté
+    if(first_tour==0){data_res=df; first_tour=1} #Je concatene aux jours précédents
+    else{data_res=bind_rows(data_res,df)}
+  }
+}
+
+for(m in 1:length(sort(distinct(data_2015["month_s"])[,1]))){ #Je parcours mes mois de l'année 2015
+  data_m=filter(data_2015,data_2015["month_s"]==m) #Je crée une table qu'avec mon mois 2015
+  for(d in 1:length(sort(distinct(data_m["day_s"])[,1]))){ #Je parcours mes jours de ce mois de 2015
+    data_md=filter(data_m,data_m["day_s"]==d) #Je crée une table qu'avec ce jour de ce mois de 2015
+    dist_inst=sort(distinct(data_md["Instant"])[,1]) ##Je trie les différents instant de ce jour
+    nb_inst=rep(NA,length(dist_inst)) #J'initialise une liste qui va contenir le nb d'emprunt de chaque instant de ce jour
+    if(length(dist_inst)==0){break;} #Si length(dist_inst)==0 (ie : j'ai aucun instnat dans la journée)
+    for (i in 1:length(nb_inst)){ #Je parcours mes instants
+        nb_inst[i]=nrow(filter(data_md,data_md["Instant"]==dist_inst[i])) #Le nombre de ligne tq l'instant dans ma table soit egale a ca
+    }
+    inst_qte=data.frame(Instant=dist_inst,Nb_emprunte=nb_inst)
+    df=inner_join(distinct(data_md),inst_qte,by="Instant")
+    if(first_tour==0){data_res=df; first_tour=1}
+    else{data_res=bind_rows(data_res,df)}
+  }
+}
+
+for(m in 1:length(sort(distinct(data_2016["month_s"])[,1]))){ #Je parcours mes mois de l'année 2016
+  data_m=filter(data_2016,data_2016["month_s"]==m) #Je crée une table qu'avec mon mois 2016
+  for(d in 1:length(sort(distinct(data_m["day_s"])[,1]))){ #Je parcours mes jours de ce mois de 2016
+    data_md=filter(data_m,data_m["day_s"]==d) #Je crée une table qu'avec ce jour de ce mois de 2016
+    dist_inst=sort(distinct(data_md["Instant"])[,1]) ##Je trie les différents instant de ce jour
+    nb_inst=rep(NA,length(dist_inst)) #J'initialise une liste qui va contenir le nb d'emprunt de chaque instant de ce jour
+    if(length(dist_inst)==0){break;} #Si length(dist_inst)==0 (ie : j'ai aucun instnat dans la journée)
+    for (i in 1:length(nb_inst)){ #Je parcours mes instants
+        nb_inst[i]=nrow(filter(data_md,data_md["Instant"]==dist_inst[i])) #Le nombre de ligne tq l'instant dans ma table soit egale a ca
+    }
+    inst_qte=data.frame(Instant=dist_inst,Nb_emprunte=nb_inst)
+    df=inner_join(distinct(data_md),inst_qte,by="Instant")
+    if(first_tour==0){data_res=df; first_tour=1}
+    else{data_res=bind_rows(data_res,df)}
+  }
+}
+
+for(m in 1:length(sort(distinct(data_2017["month_s"])[,1]))){ #Je parcours mes mois de l'année 2017
+  data_m=filter(data_2017,data_2017["month_s"]==m) #Je crée une table qu'avec mon mois 2017
+  for(d in 1:length(sort(distinct(data_m["day_s"])[,1]))){ #Je parcours mes jours de ce mois de 2017
+    data_md=filter(data_m,data_m["day_s"]==d) #Je crée une table qu'avec ce jour de ce mois de 2017
+    dist_inst=sort(distinct(data_md["Instant"])[,1]) ##Je trie les différents instant de ce jour
+    nb_inst=rep(NA,length(dist_inst)) #J'initialise une liste qui va contenir le nb d'emprunt de chaque instant de ce jour
+    if(length(dist_inst)==0){break;} #Si length(dist_inst)==0 (ie : j'ai aucun instnat dans la journée)
+    for (i in 1:length(nb_inst)){ #Je parcours mes instants
+        nb_inst[i]=nrow(filter(data_md,data_md["Instant"]==dist_inst[i])) #Le nombre de ligne tq l'instant dans ma table soit egale a ca
+    }
+    inst_qte=data.frame(Instant=dist_inst,Nb_emprunte=nb_inst)
+    df=inner_join(distinct(data_md),inst_qte,by="Instant")
+    if(first_tour==0){data_res=df; first_tour=1}
+    else{data_res=bind_rows(data_res,df)}
+  }
+}
+
+print(nrow(distinct(data)))
+print(nrow(data_res))
+print("J'ai 1000 lignes de différence entre data et data_res ?? Je ne comprends pas d'où ça peut provenir")
+
+data_res=select(data_res,-hour_s,-year_s,-month_s,-week_s,-day_s) #Je retire les variables calendaires que ne m'intérèssent finalement pas.
+data_res=relocate(data_res,DateTime,events,temperature,Posy_s,wday_s,Instant,Nb_emprunte) #Je mets la variable DateTime en colonne n°1
+data_res = data_res[order(data_res$DateTime),] #Trie par date
+
+##Enregistrement de la nouvelle table réduite en enrichie :
+#write.table(data_res,file="data_velib.csv",sep=",",col.names=TRUE,row.names=FALSE)
+
+##Suppression des variables dont j'ai plus besoin : 
+#rm(data_2014,data_2015,data_2016,data_2017,df,inst_qte,data_m,data_md,data_res,data,data_full,d,dist_inst,first_tour,i,m,nb_inst)
+```
+
+
+# Entrainement des prédicteurs sur la table réduite : 
+
+```{r, chargement de la table, include=FALSE, echo=FALSE}
+data_velib=read.table('E:/Projet M2/Série temporelles (Projet)/data_velib.csv',sep=",",header=TRUE)
+data_velib["temperature"]=(data_velib["temperature"]-32)*5/9  ##Conversion de farenheit à celsius
+```
+
+```{r, echo=FALSE}
+print("Résumé de nos données : ")
+print(summary(data_velib))
+```
+
+Nous n'avons maintenant plus que 7 variables : 1 à expliquée et 6 explicatives. Notre variable d'intérêt s'étend entre 1 et 2356 avec une moyenne à 161. On a donc un instant dans une de nos années où 2356 personnes ont emprunté un vélo (c'est beaucoup). On remarque aussi une grosse différence entre la médiane (20) et la moyenne (161), on a donc soit une moyenne fortement tirée par ses extrêmes. 
+
+```{r, matrice de corrélation, echo=FALSE}
+data_cor=select(data_velib,-DateTime,-events)
+correlation <- cor(data_cor)
+corrplot(correlation, type="upper", order="hclust", tl.col="black", tl.srt=45)
+
+pca=PCA(data_cor,graph = FALSE)
+fviz_pca_var(pca, title ="Cercle de corrélation entre les variables : ")
+print("Variance expliquée par chaque composante principale : ")
+get_eigenvalue(pca)
+
+rm(data_cor,pca,correlation)
+```
+
+Maintenant que nous avons réduit notre table regardons un peu plus précisement ce que ça donne et notament la corrélation entre nos variables et surtout celle avec notre variable d'interêt. 
+On voit comme principalement corrélation la relation température et position dans l'année (pas très surprenant), température/quantité empruntée et température/Instant. Ces dernières nous intéressent plus car elles concernent notre variable d'intérêt.
+
+```{r, fonction erreur, echo=FALSE}
+rmse <- function(y,y_hat){
+  sqrt(mean((y - y_hat)^2,na.rm = TRUE))
+}
+
+mape <- function(y,y_hat, ymin = 0){
+  idx = which(abs(y) > ymin)
+  100*(mean((abs(y[idx] - y_hat[idx])/abs(y[idx])),na.rm = TRUE))
+}
+```
+
+```{r, train/test, echo=FALSE}
+choix = data_velib$DateTime[floor(nrow(data_velib)*0.75)]
+data_train = filter(data_velib, DateTime < choix)
+data_test  = filter(data_velib, DateTime >= choix)
+```
+
+```{r, matrice de resultats, echo=FALSE}
+mres=matrix(NA,8,3)
+colnames(mres)=c('Model','RMSE','MAPE')
+```
+
+## Entrainement des modèles : 
+
+Maintenant que nous avons composé nos données de train et de test afin d'entrainer et d'évaluer les prédicteurs, passons à la modélisation. On fera successivement : La régression linéaire, un GAM, un CART, une Random Forest et un XGBOOST. Après avoir fait tous ces prédicteurs nous essayerons une agregation d'experts avec tous ces modèles.
+
+### Régression Linéaire :
+
+```{r, regression linéaire, echo=FALSE}
+reg_lin=lm(Nb_emprunte~temperature+as.factor(Instant)+as.factor(events),data_train)
+
+lm_pred=predict(reg_lin,data_test)
+mres[1,]=c("Reg Lin",round(rmse(data_test$Nb_emprunte,lm_pred),digits=2),round(mape(data_test$Nb_emprunte,lm_pred),digits=2))
+print(mres[1,2])
+print(mres[1,3])
+print("Moyenne du nb_emprunte : ") 
+mean(data_velib["Nb_emprunte"][,1])
+```
+
+On obtient des résultats d'erreurs abherrants surtout le mape qui est censé être un pourcentage j'obtiens 976.48 et 203.57 en rmse (c'est élevé aussi quand on compare a notre valeur moyenne du nombre de vélo emprunté. Essayons de voir les prédictions que nous faisons pour voir si nous n'identifions pas de problèmes dans celles-ci ce qui pourrait peut-être expliquer ces résultats.
+
+```{r, correction, echo=FALSE}
+print("Résumé des prédictions : ")
+summary(lm_pred)
+print("Nombre de prédictions négatives :")
+print(sum(lm_pred<0))
+lm_pred[lm_pred<0]=0
+print("Résumé des prédictions : ")
+summary(lm_pred)
+mres[1,]=c("Reg Lin",round(rmse(data_test$Nb_emprunte,lm_pred),digits=2),round(mape(data_test$Nb_emprunte,lm_pred),digits=2))
+print(mres[1,2])
+print(mres[1,3])
+```
+En observant nos prédictions nous voyons que certaines sont négatives : 3347 exactement sur 14614. Dans notre cas un nombre négatif n'est pas du tout logique donc on peut partir du principe que si notre prédicteur dit un nombre négatif nous considérons que c'est 0. En agissant ainsi nous arrivons à baisser nos erreurs à 200.58 en RMSE (même ordre de grandeur qu'avant) et 381.74 en MAPE au lieu de 976.48 avant !
+
+```{r plot lm, echo=FALSE}
+plot(1:nrow(data_test),data_test$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté",main="Comparaison des prédictions/vraies valeurs")
+lines(lm_pred,col='red')
+```
+La régression linéaires ne détecte pas du tout les gros accroissement qu'on voit à partir de l'instant 3000 environ.Espérons que nos prochains prédicteur fassent un peu mieux que la régression linéaire.
+
+### Modèle GAM :
+
+```{r, GAM, echo=FALSE}
+form  <- Nb_emprunte~s(temperature,bs='cr',k=15) +as.factor(Instant)+as.factor(events)+s(Posy_s,bs='cc',k=5)+as.factor(wday_s)
+gam_mod <- gam(formula = form, data = data_train)
+
+gam_pred = predict(gam_mod,data_test)
+gam_pred[gam_pred<0]=0
+mres[2,]=c("GAM",round(rmse(data_test$Nb_emprunte,gam_pred),digits=2),round(mape(data_test$Nb_emprunte,gam_pred),digits=2))
+print(mres[2,2])
+print(mres[2,3])
+
+summary(gam_mod)
+```
+
+```{r plot gam, echo=FALSE}
+plot(1:nrow(data_test),data_test$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(gam_pred,col='red')
+```
+Notre modèle gam nous permet d'estimer le niveau de significabilité de nos variables ainsi que le pourcentage de variabilité dans nos variables que nous arrivons à expliqué. Ici nous d'arrivons à expliqué que 66.8% de notre variabilité alors que nous utilisons presque toutes nos variables pour construire notre GAM. Nous manquons donc surement de variable pour correctement prédire la quantité de vélo empruntée.
+Concernant les résultats d'erreur on reste principalement sur les mêmes ordres de gradeurs qu'avec la régression linéaire de base ce qui est confirmé par un plot des prédictions très similaire à celui de la régression.
+
+### CART : 
+
+```{r, CART,fig.height = 15, fig.width = 20, echo=FALSE}
+DT=rpart(Nb_emprunte~.,data_train[,-1]) #Je retire le DateTime
+plot(DT)
+text(DT)
+dt_pred=predict(DT,data_test)
+mres[3,]=c("CART",round(rmse(data_test$Nb_emprunte,dt_pred),digits=2),round(mape(data_test$Nb_emprunte,dt_pred),digits=2))
+print(mres[3,2])
+print(mres[3,3])
+
+print("Résumé des prédictions : ")
+summary(dt_pred)
+```
+
+```{r plot dt , echo=FALSE}
+plot(1:nrow(data_test),data_test$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(dt_pred,col='red')
+```
+L'arbre de décision nous donne des résultats bien pire qu'avant sans aucune prédiction négative mais nous permet d'identifier les variables selon lesquelles il coupe.
+Ici on voit qu'il coupe souvent par Instant et Temperature, comme prévu mais au moins on a confirmation, il coupe aussi un peu selon le jour de la semaine. Tout ça rejoint les resultat de notre matrice de corrélation.
+Concernant ses prédictions on peut voir qu'il est bien meilleurs sur les grands pics qui posaient problèmes avant mais globalement il est très mauvais. Il a au moins le mérite d'essayer de prédire les grandes hausses.
+
+### Random Forest :
+
+```{r, Random Forest, echo=FALSE}
+RF=ranger(Nb_emprunte~.,select(data_train,-DateTime),num.trees=100,importance='permutation') #TP4 
+rf_pred=predict(RF,data_test)$predictions
+mres[4,]=c("Random Forest",round(rmse(data_test$Nb_emprunte,rf_pred),digits=2),round(mape(data_test$Nb_emprunte,rf_pred),digits=2))
+print(mres[4,2])
+print(mres[4,3]) 
+```
+
+```{r, importance RF,fig.width=12,fig.height=4, echo=FALSE}
+print("Importance des variables dans la RF : ")
+print(sort(RF$variable.importance,decreasing = T))
+barplot(sort(RF$variable.importance,decreasing = T))
+```
+
+```{r plot rf, echo=FALSE}
+plot(1:nrow(data_test),data_test$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(rf_pred,col='red')
+```
+
+La random forest fait le meilleur score en RMSE mais pas en MAPE. Honnêtement je ne comprends plus trop j'ai pas d'explication sur les valeurs de mes erreurs j'analyserai donc le graphe des prédictions maintenant. Ici, avec la random forest on obtient déjà quelque chose de beaucoup plus ressemblant à nos données avec de grandes augmentation passagère et des chutes très violentes, les prédiction on pourant souvent l'air en dessous de la valeur bien que la "forme" soit quasiment là.
+
+### XGBoost :
+
+```{r, XGBoost, echo=FALSE}
+xgb=xgboost(data=as.matrix(data_train[,3:6]),label=as.matrix(data_train[,7]),max.depth=4,eta=0.8,nthread=3,nrounds=150,verbose=FALSE,objective="reg:squarederror")
+xgb_pred=predict(xgb,as.matrix(data_test[,3:6]))
+mres[5,]=c("XGBoost",round(rmse(data_test$Nb_emprunte,xgb_pred),digits=2),round(mape(data_test$Nb_emprunte,xgb_pred),digits=2))
+print(mres[5,2])
+print(mres[5,3])
+print("Résumé des prédictions : ")
+summary(xgb_pred)
+xgb_pred[xgb_pred<0]=0
+print("Résumé des prédictions : ")
+summary(xgb_pred)
+mres[5,]=c("XGBoost",round(rmse(data_test$Nb_emprunte,xgb_pred),digits=2),round(mape(data_test$Nb_emprunte,xgb_pred),digits=2))
+print(mres[5,2])
+print(mres[5,3])
+```
+```{r plot xgb, echo=FALSE}
+plot(1:nrow(data_test),data_test$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(xgb_pred,col='red')
+```
+
+Le XGBoost nous donne un peu d'espoir, il fait de très bons scores comparé aux autres à la fois en MAPE et en RMSE. Son graphe de prédiction est aussi très prometteur avec beaucoup plus de prédiction très haute tentée par le xgb et des chutes un peu moins violentes que le random forest.
+
+### Agrégation d'experts : 
+
+```{r, agreg experts, echo=FALSE}
+experts <- cbind(lm_pred,
+                 rf_pred,
+                 gam_pred,
+                 dt_pred,
+                 xgb_pred)
+colnames(experts)<-c("Reg Lin", 
+                     "Random Forest", 
+                     "GAM",
+                     "Decision tree",
+                     "XGBoost")
+
+
+## Gradient loss = F 
+agg.online1 <- mixture(
+  Y = data_test$Nb_emprunte, 
+  experts = experts, 
+  model = 'EWA', 
+  loss.type = "square", 
+  loss.gradient = FALSE)
+
+poids <- agg.online1$weights %>% as.data.frame()
+poids$DateTime <- data_test$DateTime
+
+
+poids[1:500,]  %>% 
+  gather(-DateTime, key = 'Modele', value = 'Poids') %>%
+  ggplot(aes(x = DateTime, y = Poids, fill = Modele)) +
+  xlab('') + ylab('Aggregation weights') + ggtitle("EWA sans Gradient Trick") +
+  geom_bar(stat="identity")
+mres[6,1]="EWA sans Gradient trick"
+mres[6,3]=round(mape(data_test$Nb_emprunte,agg.online1$prediction),digits=2)
+mres[6,2]=round(rmse(data_test$Nb_emprunte,agg.online1$prediction),digits=2)
+
+
+## Gradient loss = T 
+agg.online2 <- mixture(
+  Y = data_test$Nb_emprunte,
+  experts = experts, 
+  model = 'EWA', 
+  loss.type = "square", loss.gradient = TRUE)
+
+poids <- agg.online2$weights %>% as.data.frame()
+poids$DateTime <- data_test$DateTime
+
+poids[1:500,]  %>% 
+  gather(-DateTime, key = 'Modele', value = 'Poids') %>%
+  ggplot(aes(x = DateTime, y = Poids, fill = Modele)) + ggtitle("EWA avec Gradient Trick") +
+  xlab('') + ylab('Aggregation weights') +
+  geom_bar(stat="identity")
+mres[7,1]="EWA avec Gradient trick"
+mres[7,3]=round(mape(data_test$Nb_emprunte,agg.online2$prediction),digits=2)
+mres[7,2]=round(rmse(data_test$Nb_emprunte,agg.online2$prediction),digits=2)
+
+##Gradient loss = T, model = BOA
+agg.online3 <- mixture(
+  Y = data_test$Nb_emprunte,
+  experts = experts, 
+  model = 'BOA', 
+  loss.type = "square", loss.gradient = TRUE)
+
+poids <- agg.online3$weights %>% as.data.frame()
+poids$DateTime <- data_test$DateTime
+
+
+poids[1:500,]  %>% 
+  gather(-DateTime, key = 'Modele', value = 'Poids') %>%
+  ggplot(aes(x = DateTime, y = Poids, fill = Modele)) + ggtitle("BOA avec Gradient Trick") +
+  xlab('') + ylab('Aggregation weights') +
+  geom_bar(stat="identity")
+mres[8,1]="BOA avec Gradient trick"
+mres[8,3]=round(mape(data_test$Nb_emprunte,agg.online3$prediction),digits=2)
+mres[8,2]=round(rmse(data_test$Nb_emprunte,agg.online3$prediction),digits=2)
+``` 
+```{r plot agg, echo=FALSE}
+plot(1:nrow(data_test),data_test$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(agg.online1$prediction,col='green')
+
+lines(agg.online2$prediction,col='blue')
+
+lines(agg.online3$prediction,col='red')
+
+legend("topleft",c("EWA sans GD","EWA avec GD","BOA avec GD"),lwd=3,col=c("green","blue","red"))
+```
+
+L'agrégation d'expert met beacuoup de poids sur le XGBoost et la regression linéaire et obtient au final des resultats proches de ceux du XGBoost seul (mais un peu mieux). Il serait intéressant de tester de nouveaux prédicteurs pour voir s'il n'y en a pas de plus adapté/meilleur pour notre problème. Le meilleur prédicteur sur le graphe est aussi le BOA avec un peut de EWA avec gradient trick en debut de prédiction. Le EWA sans gradient trick est quant a lui totalement recouvert par les deux précédents.
+
+## Résulats :
+```{r, echo=FALSE}
+print("Erreur sur le test : ")
+res=cbind(mres,"RMSE/mean"=round(as.numeric(mres[,2])/mean(data_velib["Nb_emprunte"][,1]),digits=2))
+print(res)
+```
+
+Globalement tous nos prédicteurs sont mauvais. Regardons les erreurs sur le train pour voir si nos prédicteurs sont mauvais juste sur le test ou aussi sur le train.
+
+```{r,echo=FALSE}
+mres_train=matrix(NA,5,3)
+colnames(mres_train)=c('Model','RMSE','MAPE')
+
+#Reg Lin : 
+lm_pred_train=predict(reg_lin,data_train)
+mres_train[1,]=c("Reg Lin",round(rmse(data_train$Nb_emprunte,lm_pred_train),digits=2),round(mape(data_train$Nb_emprunte,lm_pred_train),digits=2))
+
+#GAM :
+gam_pred_train=predict(gam_mod,data_train)
+mres_train[2,]=c("GAM",round(rmse(data_train$Nb_emprunte,gam_pred_train),digits=2),round(mape(data_train$Nb_emprunte,gam_pred_train),digits=2))
+
+#DT :
+dt_pred_train=predict(DT,data_train)
+mres_train[3,]=c("CART",round(rmse(data_train$Nb_emprunte,dt_pred_train),digits=2),round(mape(data_train$Nb_emprunte,dt_pred_train),digits=2))
+
+#RF
+rf_pred_train=predict(RF,data_train)$predictions
+mres_train[4,]=c("Random Forest",round(rmse(data_train$Nb_emprunte,rf_pred_train),digits=2),round(mape(data_train$Nb_emprunte,rf_pred_train),digits=2))
+
+#XGBoost :
+xgb_pred_train=predict(xgb,as.matrix(data_train[,3:6]))
+xgb_pred_train[xgb_pred_train<0]=0
+mres_train[5,]=c("XGBoost",round(rmse(data_train$Nb_emprunte,xgb_pred_train),digits=2),round(mape(data_train$Nb_emprunte,xgb_pred_train),digits=2))
+
+print("Erreur sur le train : ")
+print(mres_train)
+```
+
+```{r plots train, echo=FALSE}
+plot(1:nrow(data_train),data_train$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(lm_pred_train,col='red')
+
+plot(1:nrow(data_train),data_train$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(gam_pred_train,col='red')
+
+plot(1:nrow(data_train),data_train$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(dt_pred_train,col='red')
+
+plot(1:nrow(data_train),data_train$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(rf_pred_train,col='red')
+
+plot(1:nrow(data_train),data_train$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(xgb_pred_train,col='red')
+```
+
+Les algorithmes ne repèrent pas du tout la tendance haussière dans nos données et ont tendance à presque prédire trop au début (sur l'année 2014) et trop peu à la fin (sur l'année 2016). La régression linéaire et le gam restent totalement dans les choux avec des prédictions bien trop faibles, ils ne repèrent que très peu les variations même sur le train.
+
+```{r, echo=FALSE,warning=FALSE}
+rm(agg.online1,agg.online3,agg.online2,data_test,data_train,data_velib,DT,experts,gam_mod,poids,reg_lin,RF,xgb,choix,dt_pred,form,gam_pred,xgb_pred,lm_pred,rf_pred)
+```
+
+Les prédicteurs sont moins mauvais sur le train que sur le test en erreur mais ils sont quand même loin d'être au niveau.
+Essayons de créer une base continue pour voir si cela change quelque chose. On aura donc plein de lignes avec un Nb_emprunté nul et nous remplirons les autres variables par interpolation (pour la temperature par exemple) ou en prenant la valeur d'après (pour events). 
+
+# Entrainement des prédicteurs sur la table continue :
+
+```{r, Création de la table (ne pas relancer), echo=FALSE,eval=FALSE}
+list_jour=c(31,28,31,30,31,30,31,31,30,31,30,31)
+first_tour=0
+for (ann in 2014:2017){
+  for(mois in 1:12){
+    if(mois==2 && ann==2016){ #Si on est en février 2016
+      for(jour in 1:(list_jour[mois]+1)){ #On a 29 jours
+        for(heure in 0:23){
+          for(i in c(0,1)){
+              date=ymd_hms(paste0(ann,"-",mois,"-",jour," ",heure,":",30*i,":00"))
+              data_res=c(data_res,date)
+          }
+        }
+      }
+    } 
+    else{
+      for(jour in 1:list_jour[mois]){
+        for(heure in 0:23){
+         for(i in c(0,1)){
+          if(first_tour==1){
+            date=ymd_hms(paste0(ann,"-",mois,"-",jour," ",heure,":",30*i,":00"))
+            data_res=c(data_res,date)
+            }    
+          if(first_tour==0){
+            date=ymd_hms(paste0(ann,"-",mois,"-",jour," ",heure,":",30*i,":00"))
+            data_res=date
+            first_tour=1
+            print(date)
+            }
+         }
+        }
+      }
+    }
+  }
+}
+date=data_res
+```
+
+```{r, finalisation de la table complete (ne pas relancer), echo=FALSE,eval=FALSE}
+library(zoo)
+date=data.frame(DateTime=substr(date,1,19))
+data=select(data_velib, DateTime, events,temperature,Nb_emprunte)
+data_comp=left_join(date,data, by='DateTime')
+data_comp[,2]=na.locf(data_comp[,2],na.rm=FALSE) #Complétion des events, prev obs.
+data_comp[1,2]=data_comp[3,2]
+data_comp[2,2]=data_comp[3,2]
+data_comp[,3]=na.approx(data_comp[,3], na.rm = FALSE) #Interpo de la température
+data_comp[1,3]=data_comp[3,3]
+data_comp[2,3]=data_comp[3,3]
+data_comp[70128,3]=data_comp[70127,3]
+data_comp[,4]=na.fill(data_comp[,4],0,na.rm=FALSE) #Remplace les NA dans Nb_emprunte par des 0
+
+data_comp=mutate(data_comp,
+                   Posy=(lubridate::yday(DateTime)-1)/(364+lubridate::leap_year(DateTime)*1),
+                   wday=wday(DateTime),
+                   Instant= 2*hour(DateTime)+1*(minute(DateTime)==30)
+)
+test=data.frame(data_comp,Saison="Hiver")
+test[which(month(test["DateTime"][,1])<=6 & month(test["DateTime"][,1])>=3),8]="Printemps"
+test[which(month(test["DateTime"][,1])>=6 & month(test["DateTime"][,1])<=9),8]="Eté"
+test[which(month(test["DateTime"][,1])>8 & month(test["DateTime"][,1])<=12),8]="Automne"
+test[which(month(test["DateTime"][,1])==3 & day(test["DateTime"][,1])<=20),8]="Hiver"
+test[which(month(test["DateTime"][,1])==9 & day(test["DateTime"][,1])>20),8]="Automne"
+test[which(month(test["DateTime"][,1])==6 & day(test["DateTime"][,1])>20),8]="Eté"
+    #Spring: March 21 - June 20
+    #Summer: June 21 - September 20
+    #Fall: September 21 - December 20
+    #Winter: December 21 - March 20
+data_comp=test
+data_comp=relocate(data_comp,DateTime,events,Saison,temperature,Posy,wday,Instant,Nb_emprunte) #Met la variable DateTime en colonne n°1
+data_comp = data_comp[order(data_comp$DateTime),]#Trie par date
+
+##Enregistrement de la nouvelle table :
+write.table(data_comp,file="data_comp.csv",sep=",",col.names=TRUE,row.names=FALSE)
+
+##Suppression des variables dont j'ai plus besoin : 
+rm(data,test,date,heure,first_tour,ann,i,jour,list_jour,mois,data_res,data_comp)
+```
+
+## Visualisation : 
+
+```{r, Chargement de la table, echo=FALSE}
+data_comp=read.table('E:/Projet M2/Série temporelles (Projet)/data_comp.csv',sep=",",header=TRUE)
+summary(data_comp)
+```
+
+Réalisons une analyse similaire à celle prédemment faite mais cette fois avec la table "continue" : 
+
+```{r, matrice de corrélation2, echo=FALSE}
+data_cor=select(data_comp,-DateTime,-events,-Saison)
+correlation <- cor(data_cor)
+corrplot(correlation, type="upper", order="hclust", tl.col="black", tl.srt=45)
+
+pca=PCA(data_cor,graph = FALSE)
+fviz_pca_var(pca, title ="Cercle de corrélation entre les variables : ")
+print("Variance expliquée par chaque composante principale : ")
+get_eigenvalue(pca)
+
+rm(data_cor,pca,correlation)
+```
+
+Au niveau des corrélations nous avons les mêmes résultats que plus tôt.
+
+```{r, conso/temperature, echo=FALSE}
+plot(data_comp["temperature"][,1],data_comp["Nb_emprunte"][,1],ylab="Nombre de vélo empruntés",xlab="Temperature")
+
+manip=select(data_comp,DateTime,Nb_emprunte,Instant,temperature)
+manip %>% dplyr::filter(Instant == 36) %>% ggplot(aes(x = temperature, y = Nb_emprunte)) + geom_point() + stat_smooth(method = "loess", formula = y ~ x, linewidth = 1)
+rm(manip)
+```
+
+```{r, conso/date, echo=FALSE}
+manip=select(data_comp,DateTime,Nb_emprunte)
+manip %>% ggplot(aes(x = DateTime, y = Nb_emprunte,group=1)) + geom_line() 
+```
+
+En traçant notre quantité de vélo emprunté en fonction de la date nous retrouvons notre tendace haussière en fonction des années.
+
+```{r, saiso+eps+acf, echo=FALSE,warning=FALSE}
+manip$t <- seq(1, nrow(manip))
+manip$saisonnality1 <- cos((manip$t+200)*2*pi/(24*365.25*2))
+reg.lin <- lm(Nb_emprunte ~ t
+               + saisonnality1 
+              , data = manip)
+
+eps <- manip$Nb_emprunte - predict(reg.lin, newdata = manip)
+plot(density(x = eps))
+
+acf(eps)
+pacf(eps)
+
+rm(eps,reg.lin,manip)
+```
+
+```{r, train/test2, echo=FALSE}
+choix = data_comp$DateTime[floor(nrow(data_comp)*0.8)] #Train
+choix2 = data_comp$DateTime[floor(nrow(data_comp)*0.9)] #Valid : choix du modèle final
+data_train_c = filter(data_comp, DateTime < choix)
+data_valid_c  = filter(data_comp, DateTime >= choix & DateTime < choix2)
+data_train_final=filter(data_comp, DateTime < choix2)
+data_test_c = filter(data_comp, DateTime >= choix2)
+```
+
+```{r, matrice de résultat2, echo=FALSE}
+mres_c=matrix(NA,8,3)
+colnames(mres_c)=c('Model','RMSE','MAPE')
+```
+
+## Entrainement des modèles : 
+
+```{r, modèles, echo=FALSE}
+reg_lin=lm(Nb_emprunte~temperature+as.factor(Instant)+as.factor(events),data_train_c)
+lm_pred=predict(reg_lin,data_valid_c)
+lm_pred[lm_pred<0]=0
+mres_c[1,]=c("Reg Lin",round(rmse(data_valid_c$Nb_emprunte,lm_pred),digits=2),round(mape(data_valid_c$Nb_emprunte,lm_pred),digits=2))
+
+form  <- Nb_emprunte~s(temperature,bs='cr',k=10) +as.factor(Instant)+as.factor(events)+s(Posy,bs='cc',k=5)+as.factor(wday)+as.factor(Saison)
+mod1 <- gam(formula = form, data = data_train_c)
+gam_pred = predict(mod1,data_valid_c)
+gam_pred[gam_pred<0]=0
+mres_c[2,]=c("GAM",round(rmse(data_valid_c$Nb_emprunte,gam_pred),digits=2),round(mape(data_valid_c$Nb_emprunte,gam_pred),digits=2))
+
+DT=rpart(Nb_emprunte~.,data_train_c[,-1])
+dt_pred=predict(DT,data_valid_c)
+mres_c[3,]=c("CART",round(rmse(data_valid_c$Nb_emprunte,dt_pred),digits=2),round(mape(data_valid_c$Nb_emprunte,dt_pred),digits=2))
+
+RF=ranger(Nb_emprunte~.,select(data_train_c,-DateTime),num.trees=100,importance='permutation') 
+rf_pred=predict(RF,data_valid_c)$predictions
+mres_c[4,]=c("Random Forest",round(rmse(data_valid_c$Nb_emprunte,rf_pred),digits=2),round(mape(data_valid_c$Nb_emprunte,rf_pred),digits=2))
+
+xgb=xgboost(data=as.matrix(data_train_c[,4:7]),label=as.matrix(data_train_c[,8]),max.depth=4,eta=0.8,nthread=3,nrounds=150,verbose=FALSE,objective="reg:squarederror")
+xgb_pred=predict(xgb,as.matrix(data_valid_c[,4:7]));xgb_pred[xgb_pred<0]=0
+mres_c[5,]=c("XGBoost",round(rmse(data_valid_c$Nb_emprunte,xgb_pred),digits=2),round(mape(data_valid_c$Nb_emprunte,xgb_pred),digits=2))
+
+###Ajout d'experts : 
+RF2=ranger(Nb_emprunte~.,select(data_train_c,-DateTime),num.trees=200) 
+rf_pred2=predict(RF,data_valid_c)$predictions
+
+form  <- Nb_emprunte~s(temperature,bs='cr') +as.factor(Instant)+as.factor(events)+s(Posy,bs='cc')+as.factor(wday)+as.factor(Saison)
+mod1 <- gam(formula = form, data = data_train_c)
+gam_pred2 = predict(mod1,data_valid_c)
+gam_pred2[gam_pred2<0]=0
+
+xgb2=xgboost(data=as.matrix(data_train_c[,4:7]),label=as.matrix(data_train_c[,8]),max.depth=4,eta=0.5,nthread=3,nrounds=200,verbose=FALSE,objective="reg:squarederror")
+xgb_pred2=predict(xgb2,as.matrix(data_valid_c[,4:7]));xgb_pred2[xgb_pred2<0]=0
+
+xgb3=xgboost(data=as.matrix(data_train_c[,4:7]),label=as.matrix(data_train_c[,8]),max.depth=4,eta=0.2,nthread=3,nrounds=150,verbose=FALSE,objective="reg:squarederror")
+xgb_pred3=predict(xgb3,as.matrix(data_valid_c[,4:7]));xgb_pred3[xgb_pred3<0]=0
+
+```
+
+```{r plots valid, echo=FALSE}
+plot(1:nrow(data_valid_c),data_valid_c$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté",main="Regression linéaire")
+lines(lm_pred,col='red')
+
+plot(1:nrow(data_valid_c),data_valid_c$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté",main="GAM")
+lines(gam_pred,col='red')
+
+plot(1:nrow(data_valid_c),data_valid_c$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté",main="Decision Tree")
+lines(dt_pred,col='red')
+
+plot(1:nrow(data_valid_c),data_valid_c$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté",main="Random Forest")
+lines(rf_pred,col='red')
+
+plot(1:nrow(data_valid_c),data_valid_c$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté",main="XGBoost")
+lines(xgb_pred,col='red')
+```
+
+
+```{r, Importance des variables RF, echo=FALSE}
+summary(mod1)
+
+print("Importance des variables pour la RF : ")
+print(sort(RF$variable.importance,decreasing = T))
+barplot(sort(RF$variable.importance,decreasing = T))
+```
+
+```{r, agregation experts2, echo=FALSE}
+experts <- cbind(lm_pred,
+                 rf_pred,
+                 gam_pred,
+                 dt_pred,
+                 xgb_pred,
+                 rf_pred2,
+                 gam_pred2,
+                 xgb_pred2,
+                 xgb_pred3)
+colnames(experts)<-c("Reg Lin", 
+                     "Random Forest", 
+                     "GAM",
+                     "Decision tree",
+                     "XGBoost",
+                     'RF2',
+                     'GAM2',
+                     'XGB2','XGB3')
+## Gradient loss = F 
+agg.online1 <- mixture(
+  Y = data_valid_c$Nb_emprunte, 
+  experts = experts, 
+  model = 'EWA', 
+  loss.type = "square", 
+  loss.gradient = FALSE)
+poids <- agg.online1$weights %>% as.data.frame()
+poids$DateTime <- data_valid_c$DateTime
+poids[1:500,]  %>% 
+  gather(-DateTime, key = 'Modele', value = 'Poids') %>%
+  ggplot(aes(x = DateTime, y = Poids, fill = Modele)) + ggtitle("EWA sans Gradient Trick") +
+  xlab('') + ylab('Aggregation weights') +
+  geom_bar(stat="identity")
+mres_c[6,1]="EWA sans Gradient trick"
+mres_c[6,3]=round(mape(data_valid_c$Nb_emprunte,agg.online1$prediction),digits=2)
+mres_c[6,2]=round(rmse(data_valid_c$Nb_emprunte,agg.online1$prediction),digits=2)
+
+## Gradient loss = T 
+agg.online2 <- mixture(
+  Y = data_valid_c$Nb_emprunte,
+  experts = experts, 
+  model = 'EWA', 
+  loss.type = "square", loss.gradient = TRUE)
+poids <- agg.online2$weights %>% as.data.frame()
+poids$DateTime <- data_valid_c$DateTime
+poids[1:500,]  %>% 
+  gather(-DateTime, key = 'Modele', value = 'Poids') %>%
+  ggplot(aes(x = DateTime, y = Poids, fill = Modele)) + ggtitle("EWA avec Gradient Trick") +
+  xlab('') + ylab('Aggregation weights') +
+  geom_bar(stat="identity")
+mres_c[7,1]="EWA avec Gradient trick"
+mres_c[7,3]=round(mape(data_valid_c$Nb_emprunte,agg.online2$prediction),digits=2)
+mres_c[7,2]=round(rmse(data_valid_c$Nb_emprunte,agg.online2$prediction),digits=2)
+
+## Gradient loss = T 
+agg.online3 <- mixture(
+  Y = data_valid_c$Nb_emprunte,
+  experts = experts, 
+  model = 'BOA', 
+  loss.type = "square", loss.gradient = TRUE)
+poids <- agg.online3$weights %>% as.data.frame()
+poids$DateTime <- data_valid_c$DateTime
+poids[1:500,]  %>% 
+  gather(-DateTime, key = 'Modele', value = 'Poids') %>%
+  ggplot(aes(x = DateTime, y = Poids, fill = Modele)) + ggtitle("BOA avec Gradient Trick") +
+  xlab('') + ylab('Aggregation weights') +
+  geom_bar(stat="identity")
+mres_c[8,1]="BOA avec Gradient trick"
+mres_c[8,3]=round(mape(data_valid_c$Nb_emprunte,agg.online3$prediction),digits=2)
+mres_c[8,2]=round(rmse(data_valid_c$Nb_emprunte,agg.online3$prediction),digits=2)
+``` 
+```{r plot valid2, echo=FALSE}
+plot(1:nrow(data_valid_c),data_valid_c$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté",main="EWA sans GD")
+lines(agg.online1$prediction,col='red')
+
+plot(1:nrow(data_valid_c),data_valid_c$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté",main="EWA avec GD")
+lines(agg.online2$prediction,col='red')
+
+plot(1:nrow(data_valid_c),data_valid_c$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté",main="BOA avec GD")
+lines(agg.online3$prediction,col='red')
+```
+## Résultats :
+
+```{r, res_c, echo=FALSE}
+res_c=cbind(mres_c,"RMSE/mean"=round(as.numeric(mres_c[,2])/mean(data_comp["Nb_emprunte"][,1]),digits=2))
+print("Résultat sur le test : ")
+print(res_c)
+print("Erreur bête en disant toujours la moyenne : ")
+pred_bete=rep(mean(data_valid_c$Nb_emprunte),nrow(data_valid_c))
+res=c("Prediction bête",round(rmse(data_valid_c$Nb_emprunte,pred_bete),digits=2),round(mape(data_valid_c$Nb_emprunte,pred_bete),digits=2),round(rmse(data_valid_c$Nb_emprunte,pred_bete)/mean(pred_bete),digits=2))
+print(res)
+```
+J'ai finalement réussi à trouver l'erreur dans mon code qui me faisait avoir des résultats ultra performants avec le XGBoost au moment de ma présentation orale.  J'obtiens donc de très mauvais résultats pour tout le monde sans savoir pourquoi. Outre le fait que tous nos résultats soient mauvais les meilleurs restent quand même avec le EWA avec gradient trick. On va dire que comme ce sont nos meilleurs résultats (bien qu'ils soient très mauvais) nous utiliserons ce prédicteur pour la suite. On pourra au moins se rassurer en se disant que nous améliorons grandement nos résultats par rapport à si nous prédisions toujours la moyenne de notre nombre de vélo emprunté.
+
+Passons à la prédiction que nous devons faire : celle de la quantité de vélo empruntée par jour sur une periode de 6 mois (mars à août). On utilisera le BOA avec Gradient Trick que nous réentrainerons sur l'ensemble d'entraînement et celui de validation de modèle.
+
+```{r, Pred finale, echo=FALSE}
+reg_lin=lm(Nb_emprunte~temperature+as.factor(Instant)+as.factor(events),data_train_final)
+lm_pred=predict(reg_lin,data_test_c); lm_pred[lm_pred<0]=0
+
+form  <- Nb_emprunte~s(temperature,bs='cr',k=10) +as.factor(Instant)+as.factor(events)+s(Posy,bs='cc',k=5)+as.factor(wday)+as.factor(Saison)
+mod1 <- gam(formula = form, data = data_train_final)
+gam_pred = predict(mod1,data_test_c); gam_pred[gam_pred<0]=0
+
+DT=rpart(Nb_emprunte~.,data_train_final[,-1])
+dt_pred=predict(DT,data_test_c)
+
+RF=ranger(Nb_emprunte~.,select(data_train_final,-DateTime),num.trees=100) 
+rf_pred=predict(RF,data_test_c)$predictions
+
+xgb=xgboost(data=as.matrix(data_train_final[,4:7]),label=as.matrix(data_train_final[,8]),max.depth=4,eta=0.8,nthread=3,nrounds=150,verbose=FALSE,objective="reg:squarederror")
+xgb_pred=predict(xgb,as.matrix(data_test_c[,4:7]));xgb_pred[xgb_pred<0]=0
+
+###Ajout d'experts : 
+RF2=ranger(Nb_emprunte~.,select(data_train_final,-DateTime),num.trees=200) 
+rf_pred2=predict(RF,data_test_c)$predictions
+
+form  <- Nb_emprunte~s(temperature,bs='cr') +as.factor(Instant)+as.factor(events)+s(Posy,bs='cc')+as.factor(wday)+as.factor(Saison)
+mod1 <- gam(formula = form, data = data_train_final)
+gam_pred2 = predict(mod1,data_test_c)
+gam_pred2[gam_pred2<0]=0
+
+xgb2=xgboost(data=as.matrix(data_train_final[,4:7]),label=as.matrix(data_train_final[,8]),max.depth=4,eta=0.5,nthread=3,nrounds=200,verbose=FALSE,objective="reg:squarederror")
+xgb_pred2=predict(xgb2,as.matrix(data_test_c[,4:7]));xgb_pred2[xgb_pred2<0]=0
+
+xgb3=xgboost(data=as.matrix(data_train_final[,4:7]),label=as.matrix(data_train_final[,8]),max.depth=4,eta=0.2,nthread=3,nrounds=150,verbose=FALSE,objective="reg:squarederror")
+xgb_pred3=predict(xgb3,as.matrix(data_test_c[,4:7]));xgb_pred3[xgb_pred3<0]=0
+
+experts <- cbind(lm_pred,
+                 rf_pred,
+                 gam_pred,
+                 dt_pred,
+                 xgb_pred,
+                 rf_pred2,
+                 gam_pred2,
+                 xgb_pred2,
+                 xgb_pred3)
+colnames(experts)<-c("Reg Lin", 
+                     "Random Forest", 
+                     "GAM",
+                     "Decision tree",
+                     "XGBoost",
+                     'RF2',
+                     'GAM2',
+                     'XGB2','XGB3')
+
+print("Ma prédiction sur de mars 2017 a aout 2017 avec XGBoost : ")
+agg.online <- mixture(
+  Y = data_test_c$Nb_emprunte,
+  experts = experts, 
+  model = 'BOA', 
+  loss.type = "square", loss.gradient = TRUE)
+poids <- agg.online$weights %>% as.data.frame()
+poids$DateTime <- data_test_c$DateTime
+poids[1:500,]  %>% 
+  gather(-DateTime, key = 'Modele', value = 'Poids') %>%
+  ggplot(aes(x = DateTime, y = Poids, fill = Modele)) + ggtitle("BOA avec Gradient Trick") +
+  xlab('') + ylab('Aggregation weights') +
+  geom_bar(stat="identity")
+
+
+print("Erreur finale : ")
+res_final=matrix(NA,1,3)
+colnames(res_final)=c("MAPE","RMSE","RMSE/mean")
+rownames(res_final)=c("BOA avec Gradient trick")
+res_final[1,]=c(round(mape(data_test_c$Nb_emprunte,agg.online$prediction),digits=2),round(rmse(data_test_c$Nb_emprunte,agg.online$prediction),digits=2),round(rmse(data_test_c$Nb_emprunte,agg.online$prediction)/mean(data_test_c$Nb_emprunte),digits=2))
+print(res_final)
+```
+```{r plots test, echo=FALSE}
+plot(1:nrow(data_test_c),data_test_c$Nb_emprunte,type='l',xlab="Instant",ylab="Nb_emprunté")
+lines(agg.online$prediction,col='red')
+```
+
+```{r,echo=FALSE,message=FALSE,warning=FALSE}
+rm(agg.online,DT,experts,mod1,poids,reg_lin,RF,RF2,xgb,xgb2,xgb3,xgb_final,dt_pred,form,gam_pred,gam_pred2,lm_pred,rf_pred,rf_pred2,xgb_pred,xgb_pred2,xgb_pred3,choix,choix2,data_valid_c,data_train_c,data_test_c,data_train_final,data_comp,mape,rmse,pred_bete)
+``` 
+
+# Conclusion : 
+
+Nous obtenons finalement sur notre prédiction de 6 mois de consommation une erreur en RMSE/mean proche de 0.7, c'est très bien comme amélioration par rapport à notre prédicteur qui donne toujours la moyenne ou même par rapport aux autres prédicteurs essayés mais c'est toujours très mauvais et étonnant que nous obtenions d'aussi mauvais résultats. Il pourrait être intérressant de régler nos hyperparamètres dans nos modèles pour voir si les problèmes viennent de là (peu probable mais n'ayant pas réussi à faire un grid search correct sur R je ne sais pas) ou si nous ne pouvons pas améliorer certains prédicteurs d'une autre manière ou m^me tester d'autres modèles (réseau de neurones,...). On pourrait aussi rajouter certaines variables explicatives (les vacances, l'humidité, ...) et pourquoi pas s'amuser à utiliser la quantité de personne prenant le métro par exemple pour voir si ça ne peut pas améliorer nos prédictions. L'idée est peut-être pas intéressante mais comme nos emprunteurs semblent être majoritairement des travailleurs si nous utilisons les prédictions de la quantité de personne prenant le métro nous pourrions peut-être voir une relation inversement proportionnel entre les deux (plus de gens prennent le metro en hiver et plus de gens prennent le vélo en été peut-être) vu que les populations utilisatrices sont les mêmes.
+La quantité de vélo emprunté ne faisant que d'augmenter au cours des années nous pouvons penser qu'en rajoutant une tendance haussière à nos données cela améliorerait (temporairement car elle ne devrait pas augmenter à vie) nos résultats. Le fait que notre train ne voit que très peu de données de 2017 (que jusqu'à février 2017) peut aussi avoir un impact notamment à cause de cette tendance haussière que nous ne mettons pas. On pourrait aussi essayer une méthode d'apprentissage en ligne ne mettant plus de poids aux derniers arrivant afin de pourquoi pas "comprendre" implicitement la tendance haussière. Je n'ai malheureusement pas réussi à effectuer tout cela dans le temps imparti.
+Pour conclure si nous devions valider ou invalider le travail fait je pense qu'il serait majoritaire invalidé car les erreurs sont bien trop grandes même si comparées à l'erreur qu'on ferait en prédisant uniquement la moyenne cela reste très convenable.
+
+
+# Bibliographie : 
+
+1 - https://www.kaggle.com/code/pcharambira/analysis-of-chicago-divvy-bicycle-sharing : Utile pour des idées de visualisation des données et des interprétations. 
+
+2 - https://www.kaggle.com/code/mazhar01/chicago-divvy-bicycle-sharing-data : Idées de variables a ajouter
+
+3 - https://www.kaggle.com/code/yaowenling/chicago-divvy-sharing-challenge-public : prédiction d'emprunt par heure (il obtient des résultats pas top, comme nous) 
+
+4 - https://www.kaggle.com/code/mattsherar/chicobikeshare
+
+5 - https://www.kaggle.com/code/yyuan111/chicago-divvy-bicycle-sharing-data-analysis#3.-Trip-duration-prediction : prediction de la durée du voyage mais intéressant pour comparer
+
+
+
